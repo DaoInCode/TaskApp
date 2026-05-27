@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { format, parseISO, startOfWeek } from "date-fns";
 
 import {
@@ -8,6 +7,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 import {
@@ -60,51 +60,41 @@ function rankColor(index: number): string {
 }
 
 export default async function HistoryPage() {
+  await requireUser();
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    redirect("/login");
-  }
 
   // Four total queries on this page. The leaderboard counting uses three of
   // them (profiles + completed tasks + attendee/standup join); in_progress
   // tasks is a separate dataset for the "Currently working on" section.
   // The completed tasks query is shared with the weekly grouping below.
-  const [profilesRes, completedRes, attendeesRes, inProgressRes] =
-    await Promise.all([
-      supabase
-        .from("profiles")
-        .select("id, full_name")
-        .order("full_name", { ascending: true })
-        .returns<Profile[]>(),
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, description, notes, completed_at, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
-        )
-        .eq("status", "completed")
-        .not("completed_at", "is", null)
-        .order("completed_at", { ascending: false })
-        .returns<CompletedTask[]>(),
-      // !inner join + happened filter so we only count attendance of standups
-      // that actually happened. Skipped standups don't add to the score.
-      supabase
-        .from("standup_attendees")
-        .select("profile_id, standups!inner(happened)")
-        .eq("standups.happened", true)
-        .returns<AttendeeRow[]>(),
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, priority, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
-        )
-        .eq("status", "in_progress")
-        .returns<InProgressTask[]>(),
-    ]);
+  const [team, completedRes, attendeesRes, inProgressRes] = await Promise.all([
+    getTeamProfiles(),
+    supabase
+      .from("tasks")
+      .select(
+        "id, title, description, notes, completed_at, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
+      )
+      .eq("status", "completed")
+      .not("completed_at", "is", null)
+      .order("completed_at", { ascending: false })
+      .returns<CompletedTask[]>(),
+    // !inner join + happened filter so we only count attendance of standups
+    // that actually happened. Skipped standups don't add to the score.
+    supabase
+      .from("standup_attendees")
+      .select("profile_id, standups!inner(happened)")
+      .eq("standups.happened", true)
+      .returns<AttendeeRow[]>(),
+    supabase
+      .from("tasks")
+      .select(
+        "id, title, priority, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
+      )
+      .eq("status", "in_progress")
+      .returns<InProgressTask[]>(),
+  ]);
 
-  const profiles = profilesRes.data ?? [];
+  const profiles: Profile[] = team;
   const completedTasks = completedRes.data ?? [];
   const attendees = attendeesRes.data ?? [];
   const inProgressTasks = inProgressRes.data ?? [];

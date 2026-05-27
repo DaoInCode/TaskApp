@@ -1,30 +1,19 @@
-import { redirect } from "next/navigation";
-
+import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { ProfileForm, type ProfileFormProfile } from "./profile-form";
 import { TeamDirectory, type TeamMember } from "./team-directory";
 
 export default async function ProfilePage() {
+  const user = await requireUser();
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  if (!user) {
-    redirect("/login");
-  }
-
-  const [profileResult, teamResult] = await Promise.all([
+  const [profileResult, team] = await Promise.all([
     supabase
       .from("profiles")
       .select("full_name, whatsapp_number, callmebot_apikey, notify_whatsapp")
       .eq("id", user.id)
       .single<ProfileFormProfile>(),
-    supabase
-      .from("profiles")
-      .select("id, full_name, whatsapp_number")
-      .order("full_name", { ascending: true })
-      .returns<TeamMember[]>(),
+    getTeamProfiles(),
   ]);
 
   const initial: ProfileFormProfile = profileResult.data ?? {
@@ -34,7 +23,7 @@ export default async function ProfilePage() {
     notify_whatsapp: false,
   };
 
-  const team: TeamMember[] = teamResult.data ?? [];
+  const members: TeamMember[] = team;
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
@@ -45,7 +34,7 @@ export default async function ProfilePage() {
         </p>
       </div>
       <ProfileForm profile={initial} />
-      <TeamDirectory members={team} currentUserId={user.id} />
+      <TeamDirectory members={members} currentUserId={user.id} />
     </div>
   );
 }

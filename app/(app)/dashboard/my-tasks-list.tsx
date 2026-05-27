@@ -49,9 +49,18 @@ export function MyTasksList({ tasks }: { tasks: MyTask[] }) {
   function handleChange(taskId: string, newStatus: TaskStatus) {
     startTransition(async () => {
       mutate({ id: taskId, status: newStatus });
-      const result = await updateTaskStatus(taskId, newStatus);
-      if (!result.ok) {
-        toast.error(result.error);
+      try {
+        const result = await updateTaskStatus(taskId, newStatus);
+        if (!result.ok) {
+          toast.error(result.error);
+        }
+      } catch (err) {
+        // updateTaskStatus throws for non-assignees. This list filters to
+        // the current user's tasks so it shouldn't fire in practice, but
+        // we mirror task-board's defensive handling.
+        toast.error(
+          err instanceof Error ? err.message : "Failed to update task status",
+        );
       }
     });
   }

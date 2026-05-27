@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { getTeamProfilesWithSecrets } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import type { BroadcastResult } from "./types";
 
@@ -135,15 +136,8 @@ export async function startMeeting(
 
   const fromName = currentProfile?.full_name?.trim() || "Someone";
 
-  const { data: others } = await supabase
-    .from("profiles")
-    .select(
-      "id, full_name, whatsapp_number, callmebot_apikey, notify_whatsapp",
-    )
-    .neq("id", user.id)
-    .returns<BroadcastProfile[]>();
-
-  const allOthers = others ?? [];
+  const team = await getTeamProfilesWithSecrets();
+  const allOthers: BroadcastProfile[] = team.filter((p) => p.id !== user.id);
 
   const eligible = allOthers.filter(
     (p) =>

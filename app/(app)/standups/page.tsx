@@ -1,6 +1,6 @@
-import { redirect } from "next/navigation";
 import { format } from "date-fns";
 
+import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { StandupsPage } from "./standups-page";
 import type { Standup, StandupProfile } from "./types";
@@ -17,27 +17,18 @@ const STANDUP_SELECT = `
 `;
 
 export default async function Page() {
+  await requireUser();
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    redirect("/login");
-  }
 
   const todayKey = format(new Date(), "yyyy-MM-dd");
 
-  const [standupsRes, profilesRes, todayRes] = await Promise.all([
+  const [standupsRes, team, todayRes] = await Promise.all([
     supabase
       .from("standups")
       .select(STANDUP_SELECT)
       .order("standup_date", { ascending: false })
       .returns<Standup[]>(),
-    supabase
-      .from("profiles")
-      .select("id, full_name")
-      .order("full_name", { ascending: true })
-      .returns<StandupProfile[]>(),
+    getTeamProfiles(),
     supabase
       .from("standups")
       .select(STANDUP_SELECT)
@@ -46,7 +37,7 @@ export default async function Page() {
   ]);
 
   const standups = standupsRes.data ?? [];
-  const profiles = profilesRes.data ?? [];
+  const profiles: StandupProfile[] = team;
   const todayStandup = todayRes.data ?? null;
   const existingDates = standups.map((s) => s.standup_date);
 

@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { claimTask, updateTaskStatus } from "./actions";
+import { claimTask, unassignTask, updateTaskStatus } from "./actions";
 import { NewTaskDialog } from "./new-task-dialog";
 import { TaskCard } from "./task-card";
 import { TaskDetailDialog } from "./task-detail-dialog";
@@ -41,11 +41,13 @@ export function TaskBoard({
   assignedTasks,
   unassignedTasks,
   profiles,
+  currentUserId,
   initialOpenTaskId,
 }: {
   assignedTasks: Task[];
   unassignedTasks: Task[];
   profiles: TaskProfile[];
+  currentUserId: string;
   initialOpenTaskId: string | null;
 }) {
   const [optimisticAssigned, mutateOptimistic] = useOptimistic<
@@ -63,9 +65,10 @@ export function TaskBoard({
     initialOpenTaskId,
   );
 
-  // Which task is mid-claim, so we can disable its button to prevent
-  // double-clicks before revalidation refreshes the lists.
+  // Per-task pending flags for claim/unassign so we can disable the
+  // corresponding button while revalidation is in flight.
   const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [unassigningId, setUnassigningId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     return optimisticAssigned.filter((t) => {
@@ -79,8 +82,8 @@ export function TaskBoard({
     });
   }, [optimisticAssigned, assigneeFilter, statusFilter, priorityFilter]);
 
-  // The detail dialog needs to find the task in either list — a claimed task
-  // gets moved between them after revalidation.
+  // The detail dialog needs to find the task in either list — claim/unassign
+  // moves tasks between them after revalidation.
   const openTask = useMemo(() => {
     if (!openTaskId) return null;
     return (
@@ -93,9 +96,20 @@ export function TaskBoard({
   function handleStatusChange(taskId: string, newStatus: TaskStatus) {
     startTransition(async () => {
       mutateOptimistic({ id: taskId, status: newStatus });
-      const result = await updateTaskStatus(taskId, newStatus);
-      if (!result.ok) {
-        toast.error(result.error);
+      try {
+        const result = await updateTaskStatus(taskId, newStatus);
+        if (!result.ok) {
+          toast.error(result.error);
+        }
+      } catch (err) {
+        // The server action throws when a non-assignee tries to change
+        // status. The optimistic update reverts automatically; we just
+        // surface the error message.
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : "Failed to update task status",
+        );
       }
     });
   }
@@ -109,6 +123,21 @@ export function TaskBoard({
         toast.error(result.error);
       } else {
         toast.success("Task claimed");
+      }
+    });
+  }
+
+  function handleUnassign(taskId: string) {
+    setUnassigningId(taskId);
+    startTransition(async () => {
+      const result = await unassignTask(taskId);
+      setUnassigningId(null);
+      if (!result.ok) {
+        toast.error(result.error);
+      } else {
+        toast.success("Unassigned");
+        // Close the detail dialog: this task is no longer "yours".
+        setOpenTaskId(null);
       }
     });
   }
@@ -224,6 +253,7 @@ export function TaskBoard({
               <li key={task.id}>
                 <TaskCard
                   task={task}
+                  currentUserId={currentUserId}
                   onStatusChange={handleStatusChange}
                   onView={setOpenTaskId}
                 />
@@ -235,10 +265,13 @@ export function TaskBoard({
 
       <TaskDetailDialog
         task={openTask}
+        currentUserId={currentUserId}
         onOpenChange={(o) => {
           if (!o) setOpenTaskId(null);
         }}
         onStatusChange={handleStatusChange}
+        onUnassign={handleUnassign}
+        unassignPending={unassigningId === openTaskId}
       />
     </div>
   );

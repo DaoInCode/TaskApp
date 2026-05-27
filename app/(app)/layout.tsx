@@ -1,10 +1,9 @@
-import { redirect } from "next/navigation";
 import { CheckSquare, LogOut } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
-import { createClient } from "@/lib/supabase/server";
+import { getMyProfile, requireUser } from "@/lib/auth";
 import { SidebarNav } from "./sidebar-nav";
 
 function getInitials(name: string | null | undefined, fallback: string) {
@@ -20,21 +19,8 @@ export default async function AppLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // proxy.ts handles redirects, but guard here too in case it's bypassed.
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("full_name, email")
-    .eq("id", user.id)
-    .single();
+  const user = await requireUser();
+  const profile = await getMyProfile();
 
   const fullName = profile?.full_name ?? "";
   const email = profile?.email ?? user.email ?? "";

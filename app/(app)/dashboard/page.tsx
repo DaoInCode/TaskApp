@@ -1,6 +1,6 @@
-import { redirect } from "next/navigation";
 import { formatDistanceToNow, parseISO } from "date-fns";
 
+import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 import {
@@ -29,48 +29,38 @@ type CompletedTask = {
 };
 
 export default async function DashboardPage() {
+  const user = await requireUser();
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    redirect("/login");
-  }
 
-  const [profilesRes, inProgressRes, myTasksRes, completedRes] =
-    await Promise.all([
-      supabase
-        .from("profiles")
-        .select("id, full_name")
-        .order("full_name", { ascending: true })
-        .returns<Profile[]>(),
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, priority, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
-        )
-        .eq("status", "in_progress")
-        .returns<InProgressTask[]>(),
-      supabase
-        .from("tasks")
-        .select("id, title, status, priority")
-        .eq("assigned_to", user.id)
-        .in("status", ["pending", "in_progress"])
-        .order("created_at", { ascending: false })
-        .returns<MyTask[]>(),
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, completed_at, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
-        )
-        .eq("status", "completed")
-        .not("completed_at", "is", null)
-        .order("completed_at", { ascending: false })
-        .limit(10)
-        .returns<CompletedTask[]>(),
-    ]);
+  const [team, inProgressRes, myTasksRes, completedRes] = await Promise.all([
+    getTeamProfiles(),
+    supabase
+      .from("tasks")
+      .select(
+        "id, title, priority, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
+      )
+      .eq("status", "in_progress")
+      .returns<InProgressTask[]>(),
+    supabase
+      .from("tasks")
+      .select("id, title, status, priority")
+      .eq("assigned_to", user.id)
+      .in("status", ["pending", "in_progress"])
+      .order("created_at", { ascending: false })
+      .returns<MyTask[]>(),
+    supabase
+      .from("tasks")
+      .select(
+        "id, title, completed_at, assigned_to:profiles!tasks_assigned_to_fkey(id, full_name)",
+      )
+      .eq("status", "completed")
+      .not("completed_at", "is", null)
+      .order("completed_at", { ascending: false })
+      .limit(10)
+      .returns<CompletedTask[]>(),
+  ]);
 
-  const profiles = profilesRes.data ?? [];
+  const profiles: Profile[] = team;
   const inProgress = inProgressRes.data ?? [];
   const myTasks = myTasksRes.data ?? [];
   const completed = completedRes.data ?? [];

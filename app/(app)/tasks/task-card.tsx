@@ -1,10 +1,23 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { format, parseISO } from "date-fns";
 import { ArrowRight, CalendarDays } from "lucide-react";
 
-import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+
+// react-markdown + remark-gfm is ~50-70KB gzipped. Lazy-load it so the /tasks
+// initial bundle doesn't carry it for cards without descriptions or for users
+// who never expand a card. ssr:false avoids the SSR/CSR mismatch flicker.
+const Markdown = dynamic(
+  () => import("@/components/markdown").then((m) => m.Markdown),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
+    ),
+  },
+);
 import {
   Select,
   SelectContent,
@@ -43,6 +56,7 @@ type CommonProps = {
 
 type DefaultProps = CommonProps & {
   claimable?: false;
+  currentUserId: string;
   onStatusChange: (taskId: string, newStatus: TaskStatus) => void;
 };
 
@@ -66,6 +80,12 @@ export function TaskCard(props: DefaultProps | ClaimableProps) {
   const lineCount = hasDescription ? description.split("\n").length : 0;
   const hasMoreContent =
     hasDescription && (lineCount > 3 || description.length > 250);
+
+  // Only the assignee gets an interactive status dropdown. Everyone else
+  // sees the same color chip as read-only — server-side guard in
+  // updateTaskStatus is the actual enforcement; this just hides the UI.
+  const canEditStatus =
+    !isClaimable && props.currentUserId === task.assigned_to?.id;
 
   return (
     <article className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-5 transition-colors hover:border-slate-300">
@@ -91,7 +111,7 @@ export function TaskCard(props: DefaultProps | ClaimableProps) {
           >
             {props.claimPending ? "Claiming…" : "Claim this task"}
           </Button>
-        ) : (
+        ) : canEditStatus ? (
           // Status pill = the Select trigger. `w-auto` overrides the primitive's
           // `w-full` base so the chip sizes to its content instead of stealing
           // the row. The primitive's data-[size=sm]:h-8 always wins on CSS
@@ -119,6 +139,17 @@ export function TaskCard(props: DefaultProps | ClaimableProps) {
               ))}
             </SelectContent>
           </Select>
+        ) : (
+          <span
+            className={cn(
+              "inline-flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium",
+              STATUS_CLASSES[task.status],
+            )}
+            aria-label={`Status: ${STATUS_LABELS[task.status]}`}
+            title={`Only ${assigneeName} can change this task's status`}
+          >
+            {STATUS_LABELS[task.status]}
+          </span>
         )}
       </div>
 

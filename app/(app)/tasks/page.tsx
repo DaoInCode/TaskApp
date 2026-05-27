@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-
+import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { TaskBoard } from "./task-board";
 import type { Task, TaskProfile } from "./types";
@@ -24,30 +23,20 @@ export default async function TasksPage({
 }: {
   searchParams: Promise<{ task?: string }>;
 }) {
+  const user = await requireUser();
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  if (!user) {
-    redirect("/login");
-  }
-
-  const [tasksResult, profilesResult] = await Promise.all([
+  const [tasksResult, team] = await Promise.all([
     supabase
       .from("tasks")
       .select(TASK_SELECT)
       .order("created_at", { ascending: false })
       .returns<Task[]>(),
-    supabase
-      .from("profiles")
-      .select("id, full_name")
-      .order("full_name", { ascending: true })
-      .returns<TaskProfile[]>(),
+    getTeamProfiles(),
   ]);
 
   const allTasks: Task[] = tasksResult.data ?? [];
-  const profiles: TaskProfile[] = profilesResult.data ?? [];
+  const profiles: TaskProfile[] = team;
 
   // Split client-side once so the board can render two sections without
   // re-filtering on every render. assigned_to is the embedded profile object,
@@ -62,6 +51,7 @@ export default async function TasksPage({
       assignedTasks={assignedTasks}
       unassignedTasks={unassignedTasks}
       profiles={profiles}
+      currentUserId={user.id}
       initialOpenTaskId={initialOpenTaskId ?? null}
     />
   );

@@ -107,6 +107,19 @@ Deno.serve(async (req) => {
       });
     }
 
+    // Belt-and-suspenders for the self-unassign path (UPDATE with
+    // old.assigned_to = user, new.assigned_to = null) and any other path
+    // that lands at a null assignee. Without this we'd try to look up a
+    // profile with id=null and either error or send a confusing skip log.
+    if (record.assigned_to === null) {
+      return json(200, {
+        ok: true,
+        action: "skipped",
+        reason: "unassigned (no recipient)",
+        assignee: null,
+      });
+    }
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const appUrl = Deno.env.get("APP_URL");

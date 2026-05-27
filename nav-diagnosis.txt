@@ -1,0 +1,326 @@
+================================================================================
+NAVIGATION SLOWNESS DIAGNOSIS  —  taskapp (Next 16.2.6, Turbopack)
+================================================================================
+
+SUMMARY  (top 3 most likely causes, ranked)
+--------------------------------------------------------------------------------
+1. Every protected navigation calls supabase.auth.getUser() AT LEAST 2x and
+   issues an extra profiles row fetch BEFORE the page itself runs.
+
+   - proxy.ts -> updateSession() -> supabase.auth.getUser()   (req #1)
+   - app/(app)/layout.tsx        -> supabase.auth.getUser()   (req #2)
+   - app/(app)/layout.tsx        -> profiles.select(...).eq(id, user.id)
+   - then the page server component runs its OWN getUser() AGAIN     (req #3)
+     (every page in app/(app)/ repeats `await supabase.auth.getUser()`)
+
+   getUser() is a network round trip to GoTrue (Supabase auth) — it does not
+   just decode the JWT. With Supabase hosted in another region this is the
+   dominant per-navigation latency; cookies/userland code combined are tiny by
+   comparison. Three sequential getUser() calls per navigation is the single
+   biggest lever in the codebase.
+
+2. Pages fetch UNBOUNDED row sets that will only get slower over time.
+
+   - /tasks       : `tasks.select(*).order(created_at desc)` — NO LIMIT, fetches
+                    every task ever created, plus a separate full profiles list.
+   - /dashboard   : full profiles list + ALL in_progress tasks + ALL of "my"
+                    pending/in_progress + last 10 completed (this one's bounded).
+   - /history     : ALL completed tasks (no limit, no date window) + ALL
+                    standup_attendees (no limit) + ALL in_progress tasks +
+                    full profiles list.
+   - /standups    : ALL standups ever (no limit) — pulled twice via the same
+                    big SELECT (once for list, once filtered to today).
+   - /profile     : full profiles directory (every user).
+
+   None of these paginate. /history and /standups in particular grow O(history)
+   forever. Today this may "feel slow" — in 6 months it will feel broken.
+
+3. The Markdown bundle (react-markdown + remark-gfm + the typography plugin's
+   styles) is imported directly into THREE client components under
+   app/(app)/tasks/ — task-card.tsx, task-detail-dialog.tsx, new-task-dialog.tsx
+   — with no dynamic() / lazy() wrapper. react-markdown pulls in unified +
+   micromark + the entire mdast pipeline; that all lands in the /tasks client
+   bundle. The Markdown component is NOT used on /dashboard, /history,
+   /standups, /profile — good — but it is loaded eagerly on /tasks even before
+   the user opens a task card or the New Task dialog.
+
+   (Not as big a factor as #1 and #2 for first-paint feel, but it inflates the
+   /tasks route bundle and shows up on every /tasks revisit if the chunk gets
+   evicted.)
+
+
+================================================================================
+DETAILS
+================================================================================
+
+PART 1 — Per-page query inspection
+--------------------------------------------------------------------------------
+
+Page                    Queries on initial load                           Pattern
+----                    -----------------------                           -------
+/tasks                  1x getUser, 2x DB (tasks + profiles)              Promise.all ✓
+/dashboard              1x getUser, 4x DB (profiles, in_progress,         Promise.all ✓
+                        my-tasks, recently-completed)
+/history                1x getUser, 4x DB (profiles, completed,           Promise.all ✓
+                        attendees, in_progress)
+/standups               1x getUser, 3x DB (standups list, profiles,       Promise.all ✓
+                        today's standup)
+/profile                1x getUser, 2x DB (own profile, team directory)   Promise.all ✓
+
+PLUS — and this is what gets missed when looking at pages in isolation:
+
+app/(app)/layout.tsx    1x getUser, 1x DB (own profile for sidebar)
+                        — runs BEFORE every page above, sequentially.
+
+So the REAL initial-load query count, end-to-end, per route:
+
+  /tasks       : 2x getUser, 3x DB queries  (layout + page)
+  /dashboard   : 2x getUser, 5x DB queries
+  /history     : 2x getUser, 5x DB queries     <-- crosses the "5+ sequential" flag
+  /standups    : 2x getUser, 4x DB queries
+  /profile     : 2x getUser, 3x DB queries
+
+And the proxy adds a THIRD getUser() before either of those even starts (on
+the cold HTML request — RSC navigations bypass it, see Part 2).
+
+Parallelism: Each page uses Promise.all correctly within its own server
+component. GOOD. The problem is not WITHIN a page — the problem is the
+sequential chain `proxy.getUser  →  layout.getUser + layout.profileQuery  →
+page.getUser + page.Promise.all(...)`. Those three stages run STRICTLY
+sequentially. The two `await getUser()`s in layout + page are independent of
+each other and could be deduped (both have access to the same cookies), but
+they are not.
+
+Nested selects vs separate queries:
+  - /tasks, /dashboard, /history, /standups all use the embedded-relation
+    syntax `assigned_to:profiles!fk(id, full_name)` to inline the assignee
+    profile into each task row. GOOD — they are not N+1ing on assignees.
+  - HOWEVER, every page that needs an avatar/name list ALSO does a
+    separate `profiles.select(id, full_name).order(full_name)` query.
+    Three of the five pages (tasks/dashboard/history) fetch the full
+    profiles directory. Today this is one row per teammate (small); it
+    duplicates across queries unnecessarily. A single shared layout-level
+    "team" fetch passed via context could remove three queries entirely.
+
+Client-side fetches on mount (useEffect with supabase):
+  - profile-form.tsx has a useEffect (line 45) but it does NOT call Supabase
+    — verified by grep. It is presumably resetting form state from props.
+  - No client component in app/(app)/ does its own supabase.* call from
+    useEffect. GOOD — no post-render "spinner of doom" pattern.
+
+
+PART 2 — Proxy / middleware analysis
+--------------------------------------------------------------------------------
+
+File: proxy.ts (root)
+Matcher actually in use:
+  /((?!_next/static|_next/image|_next/data|auth/callback|favicon.ico|
+       sitemap.xml|robots.txt|.*\.[\w]+$).*)
+
+  - _next/data    : EXCLUDED  ✓
+  - auth/callback : EXCLUDED  ✓
+  - extensioned   : EXCLUDED  ✓
+  - RSC prefetches: NOT excluded by the matcher (Next-Router-Prefetch is a
+                    header, not a URL pattern). Handled by an in-body check
+                    instead — see below.
+
+File: lib/supabase/proxy.ts
+RSC short-circuit: PRESENT and FIRST thing in the function.
+  if (request.headers.get("RSC") === "1" ||
+      request.headers.get("Next-Router-Prefetch") === "1") {
+    return NextResponse.next({ request });
+  }
+  Placement is correct (before any Supabase work). This is what kept the
+  earlier "freeze under Turbopack" from coming back. GOOD.
+
+Public path bypass: PRESENT.
+  if (isPublic && !hasAuthCookie) return next();
+  Only short-circuits when there is no sb-*-auth-token cookie at all. On
+  /login while LOGGED IN, the proxy still calls Supabase. Edge case, but
+  worth flagging.
+
+supabase.auth.getUser() caching: NONE.
+  Every request that passes the RSC and public-no-cookie bypasses calls
+  supabase.auth.getUser() unconditionally. There is no in-memory cache, no
+  KV cache, no early-out on a recently-refreshed cookie. Each one is a
+  network call to GoTrue.
+
+Work the proxy does on public paths (/login, /signup) when an auth cookie
+IS present: full Supabase client construction + getUser() + then falls
+through to NextResponse.next() because user exists AND isPublic. The cookie
+check at line ~36 only short-circuits when (isPublic && !hasAuthCookie).
+This means a logged-in user prefetching /login (which Next does on hover
+of the logout button) pays the full getUser() cost. Low-traffic, but
+trivially fixable.
+
+curl latency observed:
+  Cold:  /tasks=5.5ms /dashboard=4.0ms /history=4.9ms /standups=3.3ms /profile=3.2ms
+  Warm:  /tasks=4.3ms /dashboard=3.2ms /history=4.6ms /standups=5.3ms /profile=3.6ms
+
+  All 307 redirects to /login (no auth cookie was sent). These measure the
+  RSC-bypass-miss + getUser()-without-token + redirect path. The proxy is
+  not slow on this path — 3-5ms is essentially noise. The slowness will
+  only show up on requests that carry a real auth cookie, where getUser()
+  actually round-trips to Supabase. Without an authenticated session in the
+  test, that cost is invisible to curl. THIS IS THE LATENCY THE USER FEELS,
+  and it is NOT captured here — see Suggested Fixes.
+
+Dev-log per-request timing breakdown:
+  The running dev server (PID 222164) has stdout connected to /dev/pts/2,
+  so the "GET /tasks 200 in Xs (next.js: Yms, proxy.ts: Zms,
+  application-code: Wms)" lines went to that terminal and are not captured
+  in .next/dev/logs/next-development.log (that file only has Compile
+  events). Could not retrieve them without restarting the dev server, which
+  would also invalidate Turbopack's warm cache.
+
+
+PART 3 — Bundle and dependency check
+--------------------------------------------------------------------------------
+
+`npx next build` could not finish — it FAILS at the TypeScript check phase
+on a PRE-EXISTING type error in app/(app)/tasks/task-board.tsx:225 ("Property
+'currentUserId' is missing in type ..."). This blocks the route-size summary
+that Next normally prints at the end of a successful build. Per instructions
+I did not modify any code to bypass it.
+
+Turbopack DID successfully compile the production output before TS bailed
+("✓ Compiled successfully in 3.3s"), so the .next/static/chunks directory
+is populated and the per-route server bundles exist under
+.next/dev/server/app/. Approximate dev-build server-page bundle sizes:
+
+  .next/dev/server/app/(app)/dashboard/page.js   4.5 KB
+  .next/dev/server/app/(app)/standups/page.js    4.5 KB
+  .next/dev/server/app/(app)/profile/page.js     4.5 KB
+  .next/dev/server/app/(app)/history/page.js     4.5 KB
+  .next/dev/server/app/(app)/tasks/page.js       4.5 KB
+  .next/dev/server/app/page.js                   3.2 KB
+
+These are server-component shells only — they don't reflect client First
+Load JS, which is what actually crosses the wire to the browser. Without
+a successful production build I cannot report exact First Load JS per
+route. The three flagged-as-suspicious markdown packages on disk:
+
+  node_modules/react-markdown              88K
+  node_modules/remark-gfm                  52K
+  node_modules/@tailwindcss/typography    140K
+
+(Disk size — bundled/gzipped size is smaller, but react-markdown's transitive
+graph through unified/micromark/mdast adds up to noticeably more than 88K
+once you count its deps. Estimating from npm's published gzipped numbers it
+is on the order of 50–70 KB gzipped delivered to the client per route that
+imports it.)
+
+@tailwindcss/typography is a Tailwind plugin — its 140 KB lives in
+node_modules but only the `prose` utility classes that actually get used
+end up in globals.css. Not a bundle problem.
+
+Markdown component import audit:
+  - components/markdown.tsx (NO "use client" directive, but imports
+    react-markdown which is a client lib — currently works because all
+    three consumers are themselves "use client" files)
+  - Imported by:
+      app/(app)/tasks/task-card.tsx          (client, rendered for every card)
+      app/(app)/tasks/task-detail-dialog.tsx (client, dialog body)
+      app/(app)/tasks/new-task-dialog.tsx    (client, dialog preview)
+  - NOT imported in /dashboard, /history, /standups, /profile  ✓
+  - But also NOT lazy/dynamic'd — it ships in the /tasks client bundle
+    even if no task has any description, and even before any dialog opens.
+
+Layout.tsx (every protected route) imports:
+  - lucide-react icons (CheckSquare, LogOut)        — small, tree-shaken
+  - Avatar, Button, Toaster from components/ui      — small
+  - sonner (via Toaster)                            — moderate, client
+  - createClient from lib/supabase/server           — server-side only
+
+Nothing in the shared layout is suspiciously heavy. The layout itself is
+not the bundle culprit.
+
+
+PART 4 — Dev server timing capture
+--------------------------------------------------------------------------------
+
+curl loop results (see Part 2). All routes return 307 in 3-5ms because no
+auth cookie was attached. We never reached the server components, so we
+cannot break out "proxy.ts: Zms vs application-code: Wms" from this.
+
+What WOULD be measurable with an authenticated cookie (not run, requires
+real session):
+  - cold proxy time per route, with getUser() actually hitting Supabase
+  - app-code time = layout.getUser + layout.profileQuery + page.getUser +
+                    page.Promise.all(N queries) + RSC rendering
+  - on warm hits (within 5 min, before access token refresh) the relative
+    breakdown should not change much — getUser() still round-trips
+
+
+================================================================================
+SUGGESTED FIXES  (not executed — listed for review)
+================================================================================
+
+A. KILL THE DUPLICATE getUser() CHAIN  (biggest expected win)
+   - Today: proxy.getUser  →  layout.getUser  →  page.getUser  (sequential).
+   - Layout and page both have access to the same cookies. Either:
+     (a) Trust the proxy: in layout.tsx and each page.tsx, replace
+         `await supabase.auth.getUser()` with `await supabase.auth.getSession()`
+         (local JWT decode, no network) and only use getUser() in the proxy.
+         The proxy already gates auth and redirects unauth'd users; layout +
+         page can safely consume the cached session.
+     (b) Cache getUser() within a single React request using React's `cache()`
+         wrapper around the createClient + getUser pair, so the second and
+         third calls inside one request resolve from memory.
+   - Expect: 1 network call per nav instead of 3. On a 100ms-per-getUser
+     setup, that's ~200ms shaved off every page transition.
+
+B. DEDUPE THE PROFILES DIRECTORY FETCH
+   - /tasks, /dashboard, /history each fetch the full profiles list
+     independently. Move it to layout.tsx, pass via React context or props.
+   - Or fetch it via React's `cache()` so all three queries collapse to one.
+   - Three queries become one, saved across every (app) navigation.
+
+C. PAGINATE / BOUND THE GROWING-FOREVER QUERIES
+   - /tasks: limit to ~200 most recent OR active-status only by default.
+     Provide a "show archived" toggle.
+   - /history: window to last 8 weeks of completed tasks for the default
+     view. Leaderboard counts can use an RPC that does the COUNT
+     server-side instead of pulling every completed row to the Node process
+     and counting in JS.
+   - /standups: limit to last 90 days; the today fetch is fine.
+   - These will keep current latency from degrading as data grows.
+
+D. LEADERBOARD: REPLACE THE N-row PULL WITH AN RPC
+   - history/page.tsx fetches ALL completed tasks and ALL standup_attendees
+     just to bucket them into per-profile counts on the Node side. Two
+     potentially huge tables, then JS aggregation. A Supabase RPC like
+     `team_leaderboard()` returning (profile_id, tasks_completed,
+     standups_attended) computed in PG is one query, returns N_team rows.
+   - Same applies to the "Completed by week" section — could be a single
+     ranked/grouped RPC. (Less urgent because it is paginated by the UI
+     via accordion, but the data fetch is not paginated.)
+
+E. LAZY-LOAD THE MARKDOWN COMPONENT
+   - Wrap with next/dynamic in task-card.tsx (only fires when a card has a
+     description), task-detail-dialog.tsx and new-task-dialog.tsx (only when
+     the dialog opens). This pulls ~50-70 KB gzipped out of the /tasks
+     initial chunk.
+   - components/markdown.tsx itself is small but its transitive deps
+     (unified, micromark, mdast-*) are the actual weight.
+
+F. PROXY: TINY WINS
+   - When isPublic && hasAuthCookie, you currently still call getUser()
+     and then fall through. You could short-circuit there too — there is
+     nothing for the proxy to gate on a public page even for logged-in
+     users. (Smaller effect; the bigger one is A above.)
+
+G. UNRELATED BUT BLOCKING: FIX THE TASK-BOARD.TSX TYPE ERROR
+   - task-board.tsx:225 is missing `currentUserId` on a TaskCard usage.
+     Production builds are currently failing. Without this fix you can't
+     get accurate First Load JS numbers, and you can't deploy.
+
+H. INSTRUMENT THE REAL HOT PATH
+   - Add a single console.time / console.timeEnd around the getUser() call
+     in the proxy and in the layout, log the delta. Run the app while
+     logged in for 60 seconds. That will give you the real per-navigation
+     getUser() cost (which curl-without-cookie cannot measure) and confirm
+     whether fix A is worth the diff before doing it.
+
+================================================================================
+EOF

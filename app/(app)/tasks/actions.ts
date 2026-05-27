@@ -91,6 +91,24 @@ export async function updateTaskStatus(
     return { ok: false, error: "Not authenticated." };
   }
 
+  // Only the assignee can change status. Throw (rather than the {ok:false}
+  // pattern used by other errors) so the optimistic UI sees a rejected
+  // promise and reverts the optimistic update; callers catch the error and
+  // surface it as a toast.
+  const { data: existing, error: fetchError } = await supabase
+    .from("tasks")
+    .select("assigned_to")
+    .eq("id", taskId)
+    .single<{ assigned_to: string | null }>();
+
+  if (fetchError || !existing) {
+    return { ok: false, error: fetchError?.message ?? "Task not found." };
+  }
+
+  if (existing.assigned_to !== user.id) {
+    throw new Error("Only the assignee can change this task's status");
+  }
+
   const patch: Record<string, unknown> = { status: newStatus };
   const now = new Date().toISOString();
 
@@ -151,6 +169,55 @@ export async function claimTask(
 
   if (count === 0) {
     return { ok: false, error: "Already claimed by someone else." };
+  }
+
+  revalidateAll();
+  return { ok: true };
+}
+
+export async function unassignTask(
+  taskId: string,
+): Promise<UpdateStatusResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return { ok: false, error: "Not authenticated." };
+  }
+
+  // Drop the task back to the unassigned pool. We clear assigned_by too so
+  // the next claimer cleanly becomes both assigner and assignee — matching
+  // the self-claim pattern and keeping the edge function's self-skip working.
+  // Description and notes are intentionally preserved so work history isn't
+  // lost on hand-off.
+  //
+  // The `.eq("assigned_to", user.id)` guard prevents one user from
+  // unassigning a task assigned to someone else; if 0 rows match we report
+  // an error rather than silently succeeding.
+  const { error, count } = await supabase
+    .from("tasks")
+    .update(
+      {
+        assigned_to: null,
+        assigned_by: null,
+        status: "pending" satisfies TaskStatus,
+        started_at: null,
+      },
+      { count: "exact" },
+    )
+    .eq("id", taskId)
+    .eq("assigned_to", user.id);
+
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+
+  if (count === 0) {
+    return {
+      ok: false,
+      error: "You can only unassign tasks assigned to you.",
+    };
   }
 
   revalidateAll();

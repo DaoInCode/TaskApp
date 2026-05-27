@@ -1,12 +1,22 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useActionState, useState } from "react";
 import { format } from "date-fns";
 import { CalendarIcon, Plus } from "lucide-react";
 import { toast } from "sonner";
 
-import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+
+const Markdown = dynamic(
+  () => import("@/components/markdown").then((m) => m.Markdown),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
+    ),
+  },
+);
 import { Calendar } from "@/components/ui/calendar";
 import {
   Dialog,

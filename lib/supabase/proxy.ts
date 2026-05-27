@@ -29,16 +29,12 @@ export async function updateSession(request: NextRequest) {
     (p) => pathname === p || pathname.startsWith(`${p}/`),
   );
 
-  // ── Bypass 2: public path + no Supabase auth cookie ──────────────────
-  // No session to refresh and no user to validate. Skip the network call.
-  // Most dev-time hot path was the login page being prefetched repeatedly
-  // while logged out — every hit was talking to Supabase for no reason.
-  const hasAuthCookie = request.cookies
-    .getAll()
-    .some(
-      (c) => c.name.startsWith("sb-") && c.name.includes("-auth-token"),
-    );
-  if (isPublic && !hasAuthCookie) {
+  // ── Bypass 2: public path ────────────────────────────────────────────
+  // There's nothing for the proxy to gate on /login, /signup, or
+  // /auth/callback even for a logged-in user — those pages handle their
+  // own "already authenticated" redirects. Skipping getUser() here avoids
+  // a wasted network call on every hover-prefetch of the logout button.
+  if (isPublic) {
     return NextResponse.next({ request });
   }
 
