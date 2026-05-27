@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { formatDistanceToNow, parseISO } from "date-fns";
 
 import { getTeamProfiles, requireUser } from "@/lib/auth";
@@ -11,6 +12,8 @@ import {
   type TaskPriority,
 } from "@/app/(app)/tasks/types";
 import { MyTasksList, type MyTask } from "./my-tasks-list";
+
+export const metadata: Metadata = { title: "Dashboard" };
 
 type Profile = { id: string; full_name: string | null };
 

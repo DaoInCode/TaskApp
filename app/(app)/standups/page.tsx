@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { format } from "date-fns";
 
 import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { StandupsPage } from "./standups-page";
 import type { Standup, StandupProfile } from "./types";
+
+export const metadata: Metadata = { title: "Standups" };
 
 const STANDUP_SELECT = `
   id,

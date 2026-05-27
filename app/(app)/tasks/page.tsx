@@ -1,7 +1,11 @@
+import type { Metadata } from "next";
+
 import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { TaskBoard } from "./task-board";
 import type { Task, TaskProfile } from "./types";
+
+export const metadata: Metadata = { title: "Tasks" };
 
 const TASK_SELECT = `
   id,

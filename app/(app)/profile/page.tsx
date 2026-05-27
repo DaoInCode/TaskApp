@@ -1,7 +1,11 @@
+import type { Metadata } from "next";
+
 import { getTeamProfiles, requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { ProfileForm, type ProfileFormProfile } from "./profile-form";
 import { TeamDirectory, type TeamMember } from "./team-directory";
+
+export const metadata: Metadata = { title: "Profile" };
 
 export default async function ProfilePage() {
   const user = await requireUser();

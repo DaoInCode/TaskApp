@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { format, parseISO, startOfWeek } from "date-fns";
 
@@ -17,6 +18,8 @@ import {
   PRIORITY_LABELS,
   type TaskPriority,
 } from "@/app/(app)/tasks/types";
+
+export const metadata: Metadata = { title: "History" };
 
 type Profile = { id: string; full_name: string | null };
 
